@@ -1,0 +1,357 @@
+#!/usr/bin/env bash
+# Helper for the manually-started dev instances in this repo.
+#
+# Compose has no cross-project `depends_on`, so the ordering rule "start the
+# shared datastores first, and only for instances that need them" lives here
+# rather than in YAML. Everything this script does is idempotent.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+# ---------------------------------------------------------------- output ----
+
+if [[ -t 1 ]]; then
+	B=$'\e[1m'; DIM=$'\e[2m'; RED=$'\e[31m'; GRN=$'\e[32m'; YLW=$'\e[33m'; N=$'\e[0m'
+else
+	B=""; DIM=""; RED=""; GRN=""; YLW=""; N=""
+fi
+
+info() { printf '%s==>%s %s\n' "$B" "$N" "$*"; }
+warn() { printf '%s==>%s %s\n' "$YLW" "$N" "$*" >&2; }
+die()  { printf '%serror:%s %s\n' "$RED" "$N" "$*" >&2; exit 1; }
+
+# ----------------------------------------------------------------- config ---
+
+[[ -f .env ]] && set -a && . ./.env && set +a || true
+
+DEV_NETWORK="${DEV_NETWORK:-devnet}"
+DEV_DOMAIN="${DEV_DOMAIN:-dev.internal}"
+
+# Folders that are instances: those containing an instance.env.
+list_instances() {
+	local d
+	for d in */; do
+		[[ -f "${d}instance.env" ]] && printf '%s\n' "${d%/}"
+	done
+}
+
+# Read one key out of an instance.env without sourcing it into our own scope.
+meta() { # meta <instance> <key> [default]
+	local v
+	v="$(grep -E "^$2=" "$1/instance.env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^"//; s/"$//')" || true
+	printf '%s' "${v:-${3:-}}"
+}
+
+# Read one key out of an instance's .env (secrets; may not exist yet).
+env_of() { # env_of <instance> <key>
+	local v
+	v="$(grep -E "^$2=" "$1/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^"//; s/"$//')" || true
+	printf '%s' "$v"
+}
+
+require_instance() {
+	[[ -d "$1" && -f "$1/instance.env" ]] \
+		|| die "unknown instance '$1'. Available: $(list_instances | tr '\n' ' ')"
+}
+
+dc() { # dc <instance> <compose args...>
+	local inst="$1"; shift
+	(cd "$inst" && docker compose "$@")
+}
+
+# ------------------------------------------------------------ preflight -----
+
+require_docker() {
+	command -v docker >/dev/null 2>&1 || die \
+		"docker is not installed. Run:
+    sudo pacman -S --needed docker docker-compose docker-buildx
+    sudo usermod -aG docker \$USER   # then log out and back in"
+
+	if ! docker info >/dev/null 2>&1; then
+		die "cannot talk to the Docker daemon. Start it for this session with:
+    sudo systemctl start docker.socket
+
+  This repo deliberately never enables Docker at boot, so it has to be started
+  by hand after each reboot."
+	fi
+}
+
+ensure_network() {
+	if ! docker network inspect "$DEV_NETWORK" >/dev/null 2>&1; then
+		info "creating network ${B}${DEV_NETWORK}${N}"
+		docker network create "$DEV_NETWORK" >/dev/null
+	fi
+}
+
+require_env_file() { # require_env_file <instance>
+	[[ -f "$1/.env" ]] || die \
+		"$1/.env is missing. Create it with:
+    cp $1/.env.example $1/.env
+  then fill in the values it documents."
+}
+
+# --------------------------------------------------------------- shared -----
+
+container_healthy() { # container_healthy <name>
+	local status
+	status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$1" 2>/dev/null)" || return 1
+	[[ "$status" == "healthy" || "$status" == "running" ]]
+}
+
+shared_ready() {
+	container_healthy shared-postgres && container_healthy shared-valkey
+}
+
+ensure_shared() {
+	if shared_ready; then
+		return 0
+	fi
+
+	info "starting shared datastores"
+	require_env_file shared
+	dc shared up -d
+
+	info "waiting for Postgres and Valkey to report healthy"
+	local i
+	for i in $(seq 1 60); do
+		if [[ "$(docker inspect -f '{{.State.Health.Status}}' shared-postgres 2>/dev/null)" == "healthy" ]] \
+		&& [[ "$(docker inspect -f '{{.State.Health.Status}}' shared-valkey 2>/dev/null)" == "healthy" ]]; then
+			printf '%s    shared datastores ready%s\n' "$GRN" "$N"
+			return 0
+		fi
+		sleep 1
+	done
+	die "shared datastores did not become healthy within 60s. Check: ./dev logs shared"
+}
+
+# Create a role and database only if absent. initdb scripts are not used because
+# they run only against a virgin data directory, silently skipping any service
+# added after the first start.
+db_create() { # db_create <dbname> <user> <password>
+	local db="$1" user="$2" pass="$3"
+	local su="${POSTGRES_USER:-postgres}"
+
+	[[ -n "$pass" ]] || die "no password available for database role '$user'"
+
+	docker exec -i shared-postgres psql -v ON_ERROR_STOP=1 -U "$su" -d "$su" >/dev/null <<-SQL
+		DO \$\$
+		BEGIN
+		  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${user}') THEN
+		    CREATE ROLE "${user}" LOGIN PASSWORD '${pass}';
+		  END IF;
+		END
+		\$\$;
+	SQL
+
+	if ! docker exec -i shared-postgres psql -U "$su" -d "$su" -tAc \
+		"SELECT 1 FROM pg_database WHERE datname='${db}'" | grep -q 1; then
+		docker exec -i shared-postgres psql -v ON_ERROR_STOP=1 -U "$su" -d "$su" \
+			-c "CREATE DATABASE \"${db}\" OWNER \"${user}\"" >/dev/null
+		info "created database ${B}${db}${N} owned by ${B}${user}${N}"
+	fi
+}
+
+provision_db() { # provision_db <instance>
+	local inst="$1"
+	local db user pwvar pass
+	db="$(meta "$inst" DB_NAME)"
+	[[ -n "$db" ]] || return 0
+
+	user="$(meta "$inst" DB_USER "$db")"
+	pwvar="$(meta "$inst" DB_PASSWORD_VAR)"
+	pass="$(env_of "$inst" "$pwvar")"
+
+	[[ -n "$pass" ]] || die "$inst/.env does not set $pwvar, which is needed to create its database role"
+	db_create "$db" "$user" "$pass"
+}
+
+# ------------------------------------------------------------- commands -----
+
+cmd_up() {
+	[[ $# -gt 0 ]] || die "usage: ./dev up <instance>...   (available: $(list_instances | tr '\n' ' '))"
+	require_docker
+	ensure_network
+
+	local inst
+	for inst in "$@"; do
+		require_instance "$inst"
+		require_env_file "$inst"
+
+		if [[ "$(meta "$inst" NEEDS_SHARED false)" == "true" ]]; then
+			ensure_shared
+			provision_db "$inst"
+		fi
+
+		info "starting ${B}${inst}${N}"
+		dc "$inst" up -d
+
+		local url; url="$(meta "$inst" URL)"
+		[[ -n "$url" ]] && printf '    %s%s%s\n' "$GRN" "$url" "$N"
+	done
+}
+
+cmd_down() {
+	[[ $# -gt 0 ]] || die "usage: ./dev down <instance>... | ./dev down --all"
+	require_docker
+
+	if [[ "${1:-}" == "--all" ]]; then
+		local inst
+		for inst in $(list_instances); do
+			[[ "$inst" == "shared" ]] && continue
+			docker compose -f "$inst/docker-compose.yml" ps -q 2>/dev/null | grep -q . \
+				&& { info "stopping ${B}${inst}${N}"; dc "$inst" down; }
+		done
+		info "stopping ${B}shared${N}"
+		dc shared down
+		return 0
+	fi
+
+	local inst
+	for inst in "$@"; do
+		require_instance "$inst"
+		info "stopping ${B}${inst}${N}"
+		dc "$inst" down
+	done
+
+	# Only tear the shared stack down once nothing depends on it, so
+	# `./dev down penpot` never knocks over another running instance.
+	local still=0 other
+	for other in $(list_instances); do
+		[[ "$(meta "$other" NEEDS_SHARED false)" == "true" ]] || continue
+		if (cd "$other" && docker compose ps -q 2>/dev/null | grep -q .); then
+			still=1
+			warn "leaving shared datastores up — ${other} is still running"
+			break
+		fi
+	done
+	if [[ $still -eq 0 ]] && shared_ready; then
+		info "no instance still needs the shared datastores; stopping shared"
+		dc shared down
+	fi
+}
+
+cmd_status() {
+	require_docker
+	printf '%-12s %-10s %s\n' "INSTANCE" "STATE" "URL"
+	printf '%s%s%s\n' "$DIM" "------------------------------------------------------------" "$N"
+
+	local inst n state
+	for inst in $(list_instances); do
+		n="$( (cd "$inst" && docker compose ps -q 2>/dev/null) | grep -c . || true)"
+		if [[ "$n" -gt 0 ]]; then
+			state="${GRN}up (${n})${N}"
+		else
+			state="${DIM}down${N}"
+		fi
+		printf '%-12s %-21b %s\n' "$inst" "$state" "$(meta "$inst" URL)"
+	done
+
+	printf '\n%snetwork:%s %s   %sdomain:%s *.%s -> %s\n' \
+		"$B" "$N" "$DEV_NETWORK" "$B" "$N" "$DEV_DOMAIN" "${DEV_HOST_IP:-unset}"
+}
+
+cmd_logs() {
+	[[ $# -gt 0 ]] || die "usage: ./dev logs <instance> [service]"
+	require_docker
+	require_instance "$1"
+	local inst="$1"; shift
+	dc "$inst" logs -f --tail 200 "$@"
+}
+
+cmd_restart() {
+	[[ $# -gt 0 ]] || die "usage: ./dev restart <instance>..."
+	require_docker
+	local inst
+	for inst in "$@"; do
+		require_instance "$inst"
+		info "restarting ${B}${inst}${N}"
+		dc "$inst" restart
+	done
+}
+
+cmd_pull() {
+	require_docker
+	local targets=("$@")
+	[[ ${#targets[@]} -eq 0 ]] && mapfile -t targets < <(list_instances)
+	local inst
+	for inst in "${targets[@]}"; do
+		require_instance "$inst"
+		info "pulling images for ${B}${inst}${N}"
+		dc "$inst" pull
+	done
+}
+
+cmd_db() {
+	require_docker
+	case "${1:-}" in
+		create)
+			[[ $# -ge 3 ]] || die "usage: ./dev db create <dbname> <user> [password]"
+			ensure_shared
+			db_create "$2" "$3" "${4:-$(openssl rand -base64 24)}"
+			;;
+		psql)
+			ensure_shared
+			docker exec -it shared-postgres psql -U "${POSTGRES_USER:-postgres}" "${@:2}"
+			;;
+		*) die "usage: ./dev db create <dbname> <user> [password] | ./dev db psql [args]" ;;
+	esac
+}
+
+cmd_trust_ca() {
+	require_docker
+	local out="devdns/caddy/root.crt"
+
+	container_healthy devdns-caddy \
+		|| die "devdns is not running. Start it first: ./dev up devdns"
+
+	docker cp devdns-caddy:/data/caddy/pki/authorities/local/root.crt "$out" \
+		|| die "could not read Caddy's root certificate from the container"
+	info "exported root CA to ${B}${out}${N}"
+
+	if [[ "${1:-}" == "--export-only" ]]; then
+		printf '    copy this to other machines and add it to their trust stores\n'
+		return 0
+	fi
+
+	info "installing into the system trust store (needs sudo)"
+	sudo trust anchor --store "$out"
+	printf '%s    installed. Firefox needs security.enterprise_roots.enabled=true%s\n' "$GRN" "$N"
+	printf '    or a manual import of %s\n' "$out"
+}
+
+usage() {
+	cat <<-USAGE
+	${B}dev${N} — start and stop the dev instances in this repo
+
+	  ./dev up <instance>...        start (brings up shared datastores first if needed)
+	  ./dev down <instance>...      stop; also stops shared once nothing needs it
+	  ./dev down --all              stop everything
+	  ./dev status                  what is running, and where to reach it
+	  ./dev logs <instance> [svc]   follow logs
+	  ./dev restart <instance>...   restart
+	  ./dev pull [instance]...      pull images (all instances if omitted)
+	  ./dev db create <db> <user> [pw]
+	  ./dev db psql [args]          psql shell on the shared Postgres
+	  ./dev trust-ca [--export-only]  install Caddy's root CA
+
+	Instances: $(list_instances | tr '\n' ' ')
+
+	Nothing here starts on boot. After a reboot, Docker itself needs starting:
+	  sudo systemctl start docker.socket
+	USAGE
+}
+
+case "${1:-}" in
+	up)        shift; cmd_up "$@" ;;
+	down)      shift; cmd_down "$@" ;;
+	status|ps) shift; cmd_status "$@" ;;
+	logs)      shift; cmd_logs "$@" ;;
+	restart)   shift; cmd_restart "$@" ;;
+	pull)      shift; cmd_pull "$@" ;;
+	db)        shift; cmd_db "$@" ;;
+	trust-ca)  shift; cmd_trust_ca "$@" ;;
+	""|-h|--help|help) usage ;;
+	*) die "unknown command '$1'. Try ./dev --help" ;;
+esac
