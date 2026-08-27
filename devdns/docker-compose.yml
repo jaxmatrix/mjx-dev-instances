@@ -1,0 +1,68 @@
+# Internal dev DNS + TLS.
+#
+#   coredns  authoritative for *.dev.internal, forwards everything else upstream
+#   caddy    wildcard TLS from its own local CA, routes by Host header
+#
+# CoreDNS binds 0.0.0.0:53 so both LAN hosts and NetBird peers can use it. Caddy
+# binds 0.0.0.0:80/443 for the same reason. Nothing else in this repo is exposed
+# beyond loopback — those services are reached through Caddy.
+
+name: devdns
+
+services:
+  coredns:
+    image: coredns/coredns:${COREDNS_VERSION:-1.12.0}
+    container_name: devdns-coredns
+    restart: "no"
+
+    command: ["-conf", "/etc/coredns/Corefile"]
+
+    ports:
+      - "${DNS_BIND_IP:-0.0.0.0}:${DNS_PORT:-53}:53/udp"
+      - "${DNS_BIND_IP:-0.0.0.0}:${DNS_PORT:-53}:53/tcp"
+
+    volumes:
+      - ./coredns/Corefile:/etc/coredns/Corefile:ro
+      - ./coredns/hosts.dev:/etc/coredns/hosts.dev:ro
+
+    environment:
+      # Substituted into the Corefile via CoreDNS's {$VAR} syntax.
+      DEV_DOMAIN: ${DEV_DOMAIN:-dev.internal}
+      DEV_HOST_IP: ${DEV_HOST_IP:?set DEV_HOST_IP in devdns/.env}
+      DNS_UPSTREAM_1: ${DNS_UPSTREAM_1:-1.1.1.1}
+      DNS_UPSTREAM_2: ${DNS_UPSTREAM_2:-9.9.9.9}
+
+    networks:
+      - devnet
+
+  caddy:
+    image: caddy:${CADDY_VERSION:-2-alpine}
+    container_name: devdns-caddy
+    restart: "no"
+
+    ports:
+      - "${HTTP_BIND_IP:-0.0.0.0}:${HTTP_PORT:-80}:80"
+      - "${HTTP_BIND_IP:-0.0.0.0}:${HTTPS_PORT:-443}:443"
+
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Named volume, not a bind mount: this holds the local CA's private key.
+      # If it is lost the root certificate changes and has to be re-trusted on
+      # every machine, so it must survive `docker compose down`.
+      - caddy_data:/data
+      - caddy_config:/config
+
+    environment:
+      DEV_DOMAIN: ${DEV_DOMAIN:-dev.internal}
+
+    networks:
+      - devnet
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  devnet:
+    external: true
+    name: ${DEV_NETWORK:-devnet}

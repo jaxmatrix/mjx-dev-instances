@@ -1,0 +1,48 @@
+# TLS termination for the internal dev domain.
+#
+# Caddy issues a wildcard certificate for *.dev.internal from its own local CA.
+# Run `./dev trust-ca` once to install that CA into the system trust store, and
+# every dev link becomes real HTTPS — which is what makes OAuth redirect URIs
+# and Secure-flagged session cookies testable without a public domain.
+
+{
+	# Use the internal CA for everything; never attempt public ACME issuance
+	# for names that cannot be validated from the internet.
+	local_certs
+
+	# Quieter logs; drop to DEBUG when diagnosing routing.
+	log {
+		level INFO
+	}
+}
+
+*.{$DEV_DOMAIN} {
+	tls internal
+
+	# Upstreams are resolved per request against Docker's embedded DNS, so an
+	# instance that is currently stopped yields a clean 502 instead of
+	# preventing Caddy from starting. That matters here because every instance
+	# starts and stops independently.
+
+	@openviking host openviking.{$DEV_DOMAIN}
+	handle @openviking {
+		reverse_proxy openviking:1933
+	}
+
+	@penpot host penpot.{$DEV_DOMAIN}
+	handle @penpot {
+		reverse_proxy penpot-frontend:8080
+	}
+
+	@mail host mail.{$DEV_DOMAIN}
+	handle @mail {
+		reverse_proxy penpot-mailcatch:1080
+	}
+
+	# Any other *.dev.internal name resolves (the DNS wildcard answers) but has
+	# no service behind it. Say so explicitly rather than serving a confusing
+	# empty response.
+	handle {
+		respond "No dev service is mapped for {host}. Add a handler in devdns/caddy/Caddyfile." 404
+	}
+}

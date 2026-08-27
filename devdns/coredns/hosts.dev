@@ -1,0 +1,10 @@
+# Per-name overrides for the dev domain, in /etc/hosts format.
+#
+# You normally do NOT need to add anything here: the wildcard template in the
+# Corefile already resolves every *.dev.internal name to DEV_HOST_IP, and Caddy
+# routes by Host header. Use this file only when a name must point somewhere
+# else — a service on another machine, or a NetBird peer.
+#
+# Examples:
+#   100.90.1.42   staging.dev.internal
+#   192.168.1.50  nas.dev.internal
