@@ -1,7 +1,7 @@
 # CoreDNS for the internal dev domain.
 #
 # {$VAR} is CoreDNS's own environment-variable substitution, populated from
-# devdns/.env via docker-compose.
+# devdns/.env by docker-compose.
 
 {$DEV_DOMAIN}:53 {
     # Per-name overrides. Anything listed here wins; everything else falls
@@ -10,18 +10,23 @@
         fallthrough
     }
 
-    # Wildcard: *.dev.internal and the apex both resolve to the dev host.
-    # This is what makes new services need no DNS change at all — Caddy routes
-    # them by Host header once a name points here.
+    # Wildcard: every name in this zone resolves to the dev host.
+    #
+    # No `match` regex is needed — the server block above already scopes this to
+    # {$DEV_DOMAIN}, and template's match defaults to `.*`. Leaving it out also
+    # avoids embedding the domain in a regex where its dots would be unescaped
+    # wildcards.
+    #
+    # This wildcard is what makes new services need no DNS change at all: the
+    # name already resolves, and Caddy routes it by Host header.
     template IN A {
-        match "^(.*\.)?{$DEV_DOMAIN}\.$"
         answer "{{ .Name }} 60 IN A {$DEV_HOST_IP}"
     }
 
     # Answer AAAA with an empty NOERROR rather than NXDOMAIN, so clients on
-    # dual-stack networks stop waiting on an IPv6 answer instead of stalling.
+    # dual-stack networks stop looking for an IPv6 address instead of stalling
+    # while the A lookup already has an answer.
     template IN AAAA {
-        match "^(.*\.)?{$DEV_DOMAIN}\.$"
         rcode NOERROR
     }
 
@@ -31,10 +36,10 @@
 
 # Everything else is forwarded upstream. This block is why the server can be
 # registered in NetBird as a *primary* nameserver: it is a complete resolver,
-# not just an authority for one domain.
+# not merely an authority for one domain.
 #
 # Upstreams are named explicitly rather than inherited from /etc/resolv.conf,
-# which would loop once this host points its own resolver at CoreDNS.
+# which would loop once this host resolves through CoreDNS itself.
 .:53 {
     forward . {$DNS_UPSTREAM_1} {$DNS_UPSTREAM_2}
     cache 30
