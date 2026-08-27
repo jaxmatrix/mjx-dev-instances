@@ -1,0 +1,44 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 1933,
+    "auth_mode": "api_key",
+    "root_api_key": "${OPENVIKING_ROOT_API_KEY}",
+    "cors_origins": ["https://openviking.dev.internal"]
+  },
+
+  "embedding": {
+    "max_concurrent": 8,
+    "max_retries": 3,
+    "dense": {
+      "provider": "gemini",
+      "api_key": "${GOOGLE_API_KEY}",
+      "model": "gemini-embedding-2-preview",
+      "dimension": 3072,
+      "input": "text",
+      "query_param": "RETRIEVAL_QUERY",
+      "document_param": "RETRIEVAL_DOCUMENT"
+    }
+  },
+
+  "vlm": {
+    "provider": "litellm",
+    "api_key": "${GOOGLE_API_KEY}",
+    "model": "${OV_VLM_MODEL}",
+    "max_concurrent": 16,
+    "max_retries": 3,
+    "timeout": 600.0
+  },
+
+  "storage": {
+    "workspace": "/app/.openviking/data",
+    "agfs": {
+      "backend": "local"
+    },
+    "vectordb": {
+      "backend": "local",
+      "name": "context",
+      "distance_metric": "cosine"
+    }
+  }
+}
