@@ -1,0 +1,76 @@
+# Shared datastores. Any instance that needs Postgres or Redis uses these rather
+# than declaring its own — ./dev starts this stack first for instances whose
+# instance.env sets NEEDS_SHARED=true.
+#
+# restart: "no" is deliberate and load-bearing: nothing in this repo may come back
+# on its own when dockerd starts. See the root README.
+
+name: shared
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: shared-postgres
+    restart: "no"
+    stop_signal: SIGINT
+
+    # Bound to loopback so host tooling (psql, DBeaver) can reach it without
+    # exposing the database to the LAN or to NetBird peers. Containers reach it
+    # by name over devnet instead.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in shared/.env}
+      POSTGRES_DB: ${POSTGRES_USER:-postgres}
+      POSTGRES_INITDB_ARGS: --data-checksums
+
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 2s
+      timeout: 10s
+      retries: 15
+      start_period: 5s
+
+    networks:
+      - devnet
+
+  valkey:
+    image: valkey/valkey:8.1-alpine
+    container_name: shared-valkey
+    restart: "no"
+
+    ports:
+      - "127.0.0.1:${VALKEY_PORT:-6379}:6379"
+
+    command: >
+      valkey-server
+      --appendonly yes
+      --maxmemory ${VALKEY_MAXMEMORY:-256mb}
+      --maxmemory-policy volatile-lfu
+
+    volumes:
+      - valkeydata:/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep -q PONG"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+    networks:
+      - devnet
+
+volumes:
+  pgdata:
+  valkeydata:
+
+networks:
+  devnet:
+    external: true
+    name: ${DEV_NETWORK:-devnet}
