@@ -1,0 +1,12 @@
+# Secrets and machine-local config — every one of these has a committed .env.example
+.env
+*/.env
+*.local
+
+# Runtime state
+openviking/data/
+devdns/caddy/root.crt
+
+# Editor / OS noise
+*.swp
+.DS_Store
