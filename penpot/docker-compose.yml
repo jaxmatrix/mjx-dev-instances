@@ -1,0 +1,139 @@
+# Penpot — self-hosted design tool.
+# Adapted from penpot/docker/images/docker-compose.yaml with two deliberate
+# changes:
+#
+#   1. The bundled penpot-postgres and penpot-valkey services are removed. This
+#      instance points at the shared/ stack instead, so Postgres and Valkey are
+#      not stood up again per service.
+#   2. restart: "no" everywhere — upstream uses `always`, which would bring
+#      Penpot back every time dockerd starts.
+#
+# Readiness of the shared datastores is handled by ./dev, which blocks on their
+# healthchecks before starting this project (compose depends_on cannot reach
+# across projects).
+
+name: penpot
+
+x-flags: &penpot-flags
+  # secure-session-cookies is left ENABLED (i.e. not disabled) because Caddy in
+  # devdns/ terminates real TLS for https://penpot.dev.internal. If you access
+  # Penpot over plain http://127.0.0.1:9001 instead, add
+  # `disable-secure-session-cookies` here or login will not stick.
+  PENPOT_FLAGS: >-
+    disable-email-verification
+    enable-smtp
+    enable-prepl-server
+    enable-mcp
+
+x-uri: &penpot-public-uri
+  PENPOT_PUBLIC_URI: ${PENPOT_PUBLIC_URI:-https://penpot.dev.internal}
+
+x-body-size: &penpot-http-body-size
+  PENPOT_HTTP_SERVER_MAX_BODY_SIZE: 367001600
+  PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: 367001600
+
+x-secret-key: &penpot-secret-key
+  PENPOT_SECRET_KEY: ${PENPOT_SECRET_KEY:?set PENPOT_SECRET_KEY in penpot/.env}
+
+services:
+  penpot-frontend:
+    image: penpotapp/frontend:${PENPOT_VERSION:-2.17}
+    container_name: penpot-frontend
+    restart: "no"
+
+    ports:
+      - "127.0.0.1:${PENPOT_PORT:-9001}:8080"
+
+    volumes:
+      - assets:/opt/data/assets
+
+    depends_on:
+      - penpot-backend
+      - penpot-exporter
+      - penpot-mcp
+
+    networks:
+      - devnet
+
+    environment:
+      <<: [*penpot-flags, *penpot-http-body-size, *penpot-public-uri]
+
+  penpot-backend:
+    image: penpotapp/backend:${PENPOT_VERSION:-2.17}
+    container_name: penpot-backend
+    restart: "no"
+
+    volumes:
+      - assets:/opt/data/assets
+
+    networks:
+      - devnet
+
+    environment:
+      <<: [*penpot-flags, *penpot-public-uri, *penpot-http-body-size, *penpot-secret-key]
+
+      # Shared Postgres (shared/). The role and database are created by
+      # `./dev up penpot` from the values in instance.env.
+      PENPOT_DATABASE_URI: postgresql://shared-postgres/${PENPOT_DATABASE_NAME:-penpot}
+      PENPOT_DATABASE_USERNAME: ${PENPOT_DATABASE_USERNAME:-penpot}
+      PENPOT_DATABASE_PASSWORD: ${PENPOT_DATABASE_PASSWORD:?set PENPOT_DATABASE_PASSWORD in penpot/.env}
+
+      # Shared Valkey (shared/). Database index 1 keeps this instance clear of
+      # anything else that later uses the same cache.
+      PENPOT_REDIS_URI: redis://shared-valkey/${PENPOT_REDIS_DB:-1}
+
+      PENPOT_OBJECTS_STORAGE_BACKEND: fs
+      PENPOT_OBJECTS_STORAGE_FS_DIRECTORY: /opt/data/assets
+
+      # Off by default for a dev instance.
+      PENPOT_TELEMETRY_ENABLED: "false"
+
+      PENPOT_SMTP_DEFAULT_FROM: no-reply@dev.internal
+      PENPOT_SMTP_DEFAULT_REPLY_TO: no-reply@dev.internal
+      PENPOT_SMTP_HOST: penpot-mailcatch
+      PENPOT_SMTP_PORT: 1025
+      PENPOT_SMTP_TLS: "false"
+      PENPOT_SMTP_SSL: "false"
+
+  penpot-exporter:
+    image: penpotapp/exporter:${PENPOT_VERSION:-2.17}
+    container_name: penpot-exporter
+    restart: "no"
+
+    networks:
+      - devnet
+
+    environment:
+      <<: [*penpot-secret-key, *penpot-public-uri]
+      PENPOT_INTERNAL_URI: http://penpot-frontend:8080
+      PENPOT_REDIS_URI: redis://shared-valkey/${PENPOT_REDIS_DB:-1}
+
+  penpot-mcp:
+    image: penpotapp/mcp:${PENPOT_VERSION:-2.17}
+    container_name: penpot-mcp
+    restart: "no"
+    networks:
+      - devnet
+
+  # Temporary SMTP sink — read everything Penpot sends at
+  # https://mail.dev.internal (or http://127.0.0.1:1080).
+  penpot-mailcatch:
+    image: sj26/mailcatcher:latest
+    container_name: penpot-mailcatch
+    restart: "no"
+
+    expose:
+      - "1025"
+    ports:
+      - "127.0.0.1:${PENPOT_MAILCATCH_PORT:-1080}:1080"
+
+    networks:
+      - devnet
+
+volumes:
+  assets:
+
+networks:
+  devnet:
+    external: true
+    name: ${DEV_NETWORK:-devnet}
