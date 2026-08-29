@@ -1,0 +1,112 @@
+# Allr — agent gateway + dashboard, fronted by the Caddy proxy in devdns/.
+#
+# Adapted from allr-agent's own docker-compose.yml with three deliberate
+# changes:
+#
+#   1. ONE container, not two. Upstream splits `gateway` and `dashboard` into
+#      separate containers and gets away with it only because both use
+#      `network_mode: host` — the dashboard's gateway-liveness probe needs a
+#      shared PID namespace. On a bridge network that split breaks, and worse,
+#      two containers bind-mounting one data dir is explicitly unsupported:
+#      "never point two containers at the same ~/.allr directory
+#      simultaneously ... cross-container sharing of a data volume corrupts
+#      session files and memory stores" (website/docs/user-guide/docker.md).
+#      So the gateway is the main process and the dashboard runs beside it as
+#      an s6-supervised service, enabled with ALLR_DASHBOARD=1.
+#   2. network_mode: host -> devnet, so Caddy can reach it by container name.
+#   3. restart: "no" — upstream uses `unless-stopped`, which would bring Allr
+#      back every time dockerd starts. See the root README.
+#
+# The dashboard's auth gate engages automatically on any non-loopback bind and
+# CANNOT be turned off: `--insecure` / ALLR_DASHBOARD_INSECURE are accepted and
+# ignored since the June 2026 hardening, and start_server refuses to bind at all
+# if no auth provider is registered. Binding 0.0.0.0 is required here for Caddy
+# to reach the container, so the bundled dashboard_auth/basic provider supplies
+# a username and password. That is also exactly what the Allr Universal client
+# logs in against, so the gate is a feature here rather than an obstacle.
+
+name: allr
+
+services:
+  allr:
+    build:
+      context: ${ALLR_SOURCE_DIR:?set ALLR_SOURCE_DIR in allr/.env}
+    image: allr-agent
+    container_name: allr
+    restart: "no"
+
+    # The gateway is the main process; the dashboard is supervised alongside it
+    # by s6 (see docker/s6-rc.d/dashboard/run in the source tree). Do NOT set
+    # `entrypoint:` or docker's `--init` — s6's /init must stay PID 1 or the
+    # supervision tree never starts and the dashboard silently never runs.
+    #
+    # NOTE: this is ["allr", "gateway", "run"], not upstream's ["gateway",
+    # "run"]. docker/main-wrapper.sh treats a first argument that is NOT an
+    # executable on PATH as an Allr subcommand and runs `drop hermes "$@"` —
+    # but the image ships no `hermes` binary (only `allr`), a leftover from the
+    # incomplete rebrand. That path dies with
+    #   s6-applyuidgid: fatal: unable to exec hermes: No such file or directory
+    # and the container exits 127. Naming `allr` explicitly takes the wrapper's
+    # "bare executable — pass through directly" branch instead, which works.
+    command: ["allr", "gateway", "run"]
+
+    # Loopback only — reachable from other peers as https://allr.dev.internal
+    # through the Caddy proxy in devdns/.
+    ports:
+      - "127.0.0.1:${ALLR_DASHBOARD_PORT:-9119}:9119"
+
+    volumes:
+      - ./data:/opt/data
+
+    environment:
+      # s6's stage2 hook remaps the in-image `hermes` user to these, so files
+      # written into ./data stay owned by the host user. Never use docker's
+      # --user instead: docker/main-wrapper.sh hard-errors on an unknown UID.
+      ALLR_UID: ${ALLR_UID:-1000}
+      ALLR_GID: ${ALLR_GID:-1000}
+
+      # Start the supervised dashboard service beside the gateway.
+      ALLR_DASHBOARD: "1"
+      ALLR_DASHBOARD_HOST: 0.0.0.0
+      ALLR_DASHBOARD_PORT: 9119
+
+      # Must include the scheme. A bare host here is silently discarded with a
+      # warning, and is documented upstream as the single most common cause of
+      # "I set ALLR_DASHBOARD_PUBLIC_URL but the OAuth callback is still http".
+      ALLR_DASHBOARD_PUBLIC_URL: ${ALLR_PUBLIC_URL:-https://allr.dev.internal}
+
+      # Username/password gate — the bundled dashboard_auth/basic provider.
+      # Plaintext is fine here: it never leaves the gitignored allr/.env, and
+      # the provider hashes it in memory at load. _SECRET is not optional in
+      # practice — without it the provider mints a random per-process HMAC key,
+      # so every restart silently invalidates the client's saved session.
+      ALLR_DASHBOARD_BASIC_AUTH_USERNAME: ${ALLR_BASIC_AUTH_USERNAME:?set ALLR_BASIC_AUTH_USERNAME in allr/.env}
+      ALLR_DASHBOARD_BASIC_AUTH_PASSWORD: ${ALLR_BASIC_AUTH_PASSWORD:?set ALLR_BASIC_AUTH_PASSWORD in allr/.env}
+      ALLR_DASHBOARD_BASIC_AUTH_SECRET: ${ALLR_BASIC_AUTH_SECRET:?set ALLR_BASIC_AUTH_SECRET in allr/.env}
+
+      # start_server enables uvicorn's proxy_headers whenever the auth gate is
+      # on, but never sets forwarded_allow_ips, so uvicorn defaults to trusting
+      # only 127.0.0.1. Caddy reaches this container from another devnet IP, so
+      # without this its X-Forwarded-Proto: https is dropped, detect_https()
+      # returns False, and the session cookies lose their Secure flag and
+      # __Host- prefix — defeating the point of the repo's real-TLS setup.
+      # Scoping to * is safe: the port is loopback-bound, so only Caddy reaches it.
+      FORWARDED_ALLOW_IPS: ${ALLR_FORWARDED_ALLOW_IPS:-*}
+
+    healthcheck:
+      # /api/status is deliberately public (dashboard_auth/public_paths.py), so
+      # this probes liveness without needing credentials. Uses the image's own
+      # Python rather than curl, which is not guaranteed to be installed.
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9119/api/status',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+    networks:
+      - devnet
+
+networks:
+  devnet:
+    external: true
+    name: ${DEV_NETWORK:-devnet}

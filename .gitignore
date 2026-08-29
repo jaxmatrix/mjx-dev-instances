@@ -5,6 +5,7 @@
 
 # Runtime state
 openviking/data/
+allr/data/
 devdns/caddy/root.crt
 
 # Editor / OS noise
