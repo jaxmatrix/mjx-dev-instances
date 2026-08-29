@@ -39,6 +39,18 @@
 		reverse_proxy penpot-mailcatch:1080
 	}
 
+	@allr host allr.{$DEV_DOMAIN}
+	handle @allr {
+		# No basic_auth here on purpose. Allr authenticates in the app itself
+		# (the bundled dashboard_auth/basic provider), and the Allr Universal
+		# client logs in with a session cookie plus a minted single-use
+		# WebSocket ticket — it has no way to answer an HTTP Basic challenge,
+		# so a proxy-level gate would lock out the very client this instance
+		# exists to test. reverse_proxy passes the /api/ws upgrade through
+		# untouched.
+		reverse_proxy allr:9119
+	}
+
 	# Any other *.dev.internal name resolves (the DNS wildcard answers) but has
 	# no service behind it. Say so explicitly rather than serving a confusing
 	# empty response.
