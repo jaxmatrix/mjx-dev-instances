@@ -8,6 +8,7 @@ and never on boot**.
 | [`shared/`](shared/) | Postgres 17 + Valkey 8.1, used by any instance that needs them | — |
 | [`openviking/`](openviking/) | OpenViking context DB, Gemini embedding 2 + LiteLLM VLM | <https://openviking.dev.internal> |
 | [`penpot/`](penpot/) | Penpot design tool | <https://penpot.dev.internal> |
+| [`allr/`](allr/) | Allr agent gateway + dashboard | <https://allr.dev.internal> |
 | [`devdns/`](devdns/) | CoreDNS for `*.dev.internal` + Caddy wildcard TLS | *(serves the rest)* |
 
 Two rules shape the whole repo:
@@ -53,6 +54,7 @@ to start an instance whose `.env` is missing and tells you what to copy.
 
 ./dev up penpot                   # brings up shared/, creates its DB, then starts
 ./dev up openviking
+./dev up allr                     # first run builds the image — slow
 
 ./dev status
 ./dev logs penpot penpot-backend
@@ -65,7 +67,7 @@ creates the `devnet` network, starts `shared/` when the instance needs it, waits
 for Postgres and Valkey to report healthy, creates the instance's database role
 if absent, and only then starts the instance.
 
-Adding a fourth service means dropping in a folder with a `docker-compose.yml`
+Adding another service means dropping in a folder with a `docker-compose.yml`
 and an `instance.env` — `./dev` discovers it, and the DNS wildcard already
 resolves its name. Only a `handle` block in `devdns/caddy/Caddyfile` is needed.
 
@@ -110,6 +112,7 @@ from other peers.
 | Valkey | `127.0.0.1:6379` |
 | OpenViking | `127.0.0.1:1933` |
 | Penpot | `127.0.0.1:9001` |
+| Allr dashboard | `127.0.0.1:9119` |
 | Mailcatcher | `127.0.0.1:1080` |
 
 ## Verifying nothing starts on boot
