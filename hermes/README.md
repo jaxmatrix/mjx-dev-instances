@@ -30,7 +30,9 @@ terminal UI. Later starts reuse the image.
 
 - Dashboard: <https://hermes.dev.internal> (or `http://127.0.0.1:9120`)
 - Login: the `HERMES_BASIC_AUTH_USERNAME` / `HERMES_BASIC_AUTH_PASSWORD` from
-  `.env` (`admin` / `hermesdev` by default — deliberately simple, for testing)
+  `.env` (`admin` / `hermesdev` by default — deliberately simple, for testing).
+  That is the bundled **simple auth** provider; see
+  [Login: the simple auth mechanism](#login-the-simple-auth-mechanism).
 
 Port 9120, not 9119: `allr/` already binds 9119 on the host. Inside the
 container the dashboard still listens on 9119, which is what Caddy proxies to.
@@ -72,24 +74,83 @@ key until you remove it from `data/.env`.
 Compose's `env_file` parser is not a shell: quotes are kept as part of the
 value, so write `OPENROUTER_API_KEY=sk-or-...` with no quotes and no `export`.
 
-## Authentication, and why it is not in Caddy
+## Login: the simple auth mechanism
 
 Hermes's dashboard auth gate engages automatically on **any** non-loopback bind,
 and it cannot be switched off — `--insecure` and `HERMES_DASHBOARD_INSECURE` are
 accepted and ignored since the June 2026 hardening, and `start_server` refuses
 to bind at all when no auth provider is registered. Because Caddy has to reach
-this container over `devnet`, the dashboard binds `0.0.0.0`, so an auth provider
-is mandatory.
+this container over `devnet`, the dashboard binds `0.0.0.0`, so a provider is
+mandatory.
 
-This instance uses the bundled `dashboard_auth/basic` provider: a username and
-password, stateless HMAC-signed sessions, no OAuth IDP and no database. It is
-configured purely through environment variables, so no secret is ever committed.
+Three ship with the source tree:
 
-A Caddy `basic_auth` block would be the wrong layer. The Universal client
-authenticates with a session cookie plus a minted WebSocket ticket, not an
-`Authorization: Basic` header, so a proxy-level challenge on `/auth/login` and
-the `/api/ws` upgrade would lock out the client this instance exists to test —
-while duplicating a gate the application already enforces.
+| Plugin | Mechanism | Needs |
+|---|---|---|
+| `plugins/dashboard_auth/basic` | **username + password** | nothing |
+| `plugins/dashboard_auth/nous` | OAuth against Nous Portal | a registered Portal client |
+| `plugins/dashboard_auth/self_hosted` | generic OIDC | an issuer (Authentik, Keycloak, Zitadel, …) |
+
+This instance uses **`basic`** — the simple one. No external identity provider,
+no database, no redirect URI to register: credentials come from environment
+variables, sessions are stateless HMAC-signed tokens the provider mints and
+verifies itself, and passwords are hashed with stdlib `scrypt`. It activates on
+its own as soon as a username and a password are configured, which is exactly
+what `hermes/.env` does:
+
+```
+HERMES_BASIC_AUTH_USERNAME=admin
+HERMES_BASIC_AUTH_PASSWORD=hermesdev
+HERMES_BASIC_AUTH_SECRET=<openssl rand -base64 32>
+```
+
+Compose maps those onto `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` / `_PASSWORD` /
+`_SECRET`. The secret is the token-signing key: without it the provider mints a
+random one per process, so every restart silently invalidates saved sessions.
+
+The same username and password are what a remote client (Universal, or a
+browser) types at `https://hermes.dev.internal`.
+
+### No plaintext at rest
+
+`_PASSWORD` is hashed in memory at load, but it does sit in `hermes/.env` in the
+clear. To avoid that, hash it up front and set `_PASSWORD_HASH` instead — the
+provider prefers the hash when both are present:
+
+```bash
+docker compose run --rm hermes python -c \
+  "from plugins.dashboard_auth.basic import hash_password; print(hash_password('your-password'))"
+```
+
+(`main-wrapper.sh` routes a first argument that is an executable straight
+through, so this runs inside the image's venv without disturbing s6.)
+
+Put the `scrypt$...` output in `hermes/.env` as
+`HERMES_BASIC_AUTH_PASSWORD_HASH`, add a matching
+`HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH` line to the compose `environment:`
+block, and drop the plaintext one.
+
+### If login fails closed
+
+`start_server` exits rather than binding when no provider registered. Two causes
+worth checking before anything else:
+
+- **Half-configured credentials.** The provider needs a username *and* a
+  password (or hash); one without the other is skipped silently.
+- **The plugin is disabled.** A `plugins.disabled` list in `data/config.yaml`
+  that names `basic` blocks it even with credentials set, and the error message
+  looks identical to having configured nothing.
+
+`./dev logs hermes` prints the gate's own hint, which names the provider it
+expected and why it skipped.
+
+### Why the gate is not in Caddy
+
+A Caddy `basic_auth` block would be the wrong layer. Clients authenticate with a
+session cookie plus a minted WebSocket ticket, not an `Authorization: Basic`
+header, so a proxy-level challenge on `/auth/login` and the `/api/ws` upgrade
+would lock out the client this instance exists to test — while duplicating a
+gate the application already enforces.
 
 ## What differs from upstream
 
@@ -98,7 +159,7 @@ while duplicating a gate the application already enforces.
 | separate `gateway` + `dashboard` containers | one container, `HERMES_DASHBOARD=1` | two containers on one data dir corrupts session and memory stores; the split only works under a shared PID namespace |
 | `network_mode: host` | `devnet` bridge | Caddy routes to it by container name |
 | dashboard on `127.0.0.1` | `0.0.0.0`, gated | reachable as `hermes.dev.internal` |
-| no auth configured | `dashboard_auth/basic` | a non-loopback bind fails closed without a provider |
+| no auth configured | the simple `plugins/dashboard_auth/basic` provider | a non-loopback bind fails closed without a provider, and this is the only bundled one needing no external IDP |
 | `restart: unless-stopped` | `restart: "no"` | nothing may come back when dockerd starts |
 | `~/.hermes` volume | `./data` | isolated from the real host profile, and from `allr/data` |
 | host port 9119 | host port 9120 | `allr/` already has 9119 |

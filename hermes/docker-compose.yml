@@ -24,8 +24,14 @@
 # CANNOT be turned off: `--insecure` / HERMES_DASHBOARD_INSECURE are accepted
 # and ignored since the June 2026 hardening, and start_server refuses to bind
 # at all if no auth provider is registered. Binding 0.0.0.0 is required here
-# for Caddy to reach the container, so the bundled dashboard_auth/basic
-# provider supplies a username and password.
+# for Caddy to reach the container, so a provider is mandatory.
+#
+# Of the three bundled ones — plugins/dashboard_auth/{basic,nous,self_hosted} —
+# this instance uses `basic`, the simple username/password mechanism. It is the
+# only one that needs no external identity provider: no Nous Portal OAuth
+# client, no OIDC issuer, no database. It auto-activates as soon as a username
+# and a password (or password hash) are configured, which the HERMES_DASHBOARD_
+# BASIC_AUTH_* vars below do, and mints its own stateless HMAC-signed sessions.
 
 name: hermes
 
@@ -86,11 +92,14 @@ services:
       # "I set HERMES_DASHBOARD_PUBLIC_URL but the OAuth callback is still http".
       HERMES_DASHBOARD_PUBLIC_URL: ${HERMES_PUBLIC_URL:-https://hermes.dev.internal}
 
-      # Username/password gate — the bundled dashboard_auth/basic provider.
-      # Plaintext is fine here: it never leaves the gitignored hermes/.env, and
-      # the provider hashes it in memory at load. _SECRET is not optional in
-      # practice — without it the provider mints a random per-process HMAC key,
-      # so every restart silently invalidates the client's saved session.
+      # The simple auth mechanism: username + password, via the bundled
+      # plugins/dashboard_auth/basic provider. Plaintext is fine here — it never
+      # leaves the gitignored hermes/.env, and the provider scrypt-hashes it in
+      # memory at load. For no plaintext at rest, set
+      # HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH instead; see hermes/README.md.
+      # _SECRET is not optional in practice — without it the provider mints a
+      # random per-process HMAC key, so every restart silently invalidates the
+      # client's saved session.
       HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_BASIC_AUTH_USERNAME:?set HERMES_BASIC_AUTH_USERNAME in hermes/.env}
       HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_BASIC_AUTH_PASSWORD:?set HERMES_BASIC_AUTH_PASSWORD in hermes/.env}
       HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${HERMES_BASIC_AUTH_SECRET:?set HERMES_BASIC_AUTH_SECRET in hermes/.env}

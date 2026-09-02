@@ -55,13 +55,64 @@ dig @127.0.0.1 github.com +short                 # -> real answer  (forwarding)
 
 ## Registering with NetBird
 
-In the NetBird dashboard: **DNS → Nameservers → Add nameserver**
+Registering CoreDNS as a NetBird nameserver is what makes `*.dev.internal`
+resolve on **other** peers, not just this machine. Four steps.
+
+### 1. Point DEV_HOST_IP at this peer's NetBird IP
+
+While `DEV_HOST_IP=127.0.0.1`, every dev name resolves to the *querying* peer's
+own loopback, so a remote peer that resolves `penpot.dev.internal` connects to
+itself and gets nothing. Other peers can only reach the services if the name
+resolves to this machine's NetBird address:
+
+```bash
+netbird status | grep 'NetBird IP'        # 100.x.y.z/16 — take the address, drop /16
+```
+
+Set it in **both** env files — `devdns/.env` is what Compose substitutes into
+the Corefile, and the root `.env` is what `./dev status` reports:
+
+```bash
+sed -i 's/^DEV_HOST_IP=.*/DEV_HOST_IP=100.x.y.z/' .env devdns/.env
+./dev restart devdns
+dig @127.0.0.1 penpot.dev.internal +short     # -> 100.x.y.z
+```
+
+### 2. Add the nameserver in the NetBird dashboard
+
+**DNS → Nameservers → Add Nameserver**
 
 | Field | Value |
 |---|---|
-| Nameserver | this peer's NetBird IP, port `53`, UDP |
-| Domains | **leave empty — mark as primary / "all domains"** |
-| Distribution groups | whichever peers should resolve dev names |
+| Name | `devdns` (anything) |
+| Nameserver | this peer's NetBird IP, port `53`, protocol UDP |
+| Match domains | **none** — enable "All domains" / mark as primary |
+| Distribution groups | the group(s) whose peers should resolve dev names |
+
+The distribution groups decide which peers get the resolver, so a group holding
+just your own devices keeps it off everything else.
+
+### 3. Verify
+
+On any peer in a distribution group:
+
+```bash
+netbird status -d | grep -i nameservers     # Nameservers: 1/1 Available
+dig penpot.dev.internal +short              # -> this peer's NetBird IP
+dig github.com +short                       # still resolves — CoreDNS forwards
+curl -I https://penpot.dev.internal         # 200/302 once the CA is trusted
+```
+
+`Nameservers: 0/0 Available` means nothing is registered for that peer — either
+no nameserver group exists yet, or the peer is not in a distribution group.
+
+### 4. Give each peer the root CA
+
+DNS only gets the peer to Caddy; the certificate still has to be trusted. See
+[Trusting the CA](#trusting-the-ca) below — `../dev trust-ca --export-only`
+writes `caddy/root.crt` for copying to the other machines.
+
+### Why primary, and not a match domain
 
 **Register it as a primary nameserver, not a match-domain one.** This is
 deliberate:
@@ -79,6 +130,24 @@ deliberate:
 peer's DNS depends on CoreDNS being reachable. Since this stack is started
 manually, add a second nameserver to the same group as a fallback, or expect
 name resolution to fail on those peers whenever devdns is down.
+
+### Troubleshooting
+
+- **`Nameservers: 0/0 Available`** — the peer is in no distribution group, or no
+  nameserver group exists. Both are dashboard-side.
+- **Peers resolve nothing while this host resolves fine.** NetBird runs its own
+  resolver on the NetBird IP at port `5053` and points `/etc/resolv.conf` there;
+  CoreDNS binds `0.0.0.0:53`, which covers the same address. Queries from this
+  host land on CoreDNS, but a NetBird DNS interception on that address can take
+  queries arriving over `wt0` first. Check with `ss -lunp | grep -E ':53|:5053'`;
+  if the two are fighting, register the nameserver on a non-standard port and set
+  `DNS_PORT` in `devdns/.env` to match.
+- **DNS resolves but nothing connects.** Check the NetBird access-control policy
+  allows the group to reach this peer on `udp/53` and `tcp/443`, and that no host
+  firewall blocks them on `wt0`.
+- **Everything looks right but names still resolve to `127.0.0.1`.** `DEV_HOST_IP`
+  was changed without restarting: the Corefile is templated at container start.
+  `./dev restart devdns`.
 
 ## Trusting the CA
 

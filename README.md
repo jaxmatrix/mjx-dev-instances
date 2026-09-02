@@ -90,6 +90,31 @@ Caddy issues a wildcard certificate from its own local CA, so dev links are real
 HTTPS. That is the point of the whole arrangement — OAuth redirect URIs and
 `Secure`-flagged session cookies cannot be tested against `localhost` alone.
 
+### Reaching it from other NetBird peers
+
+Out of the box `DEV_HOST_IP=127.0.0.1`, which is local-only: a remote peer that
+resolved `penpot.dev.internal` would get its own loopback. Three things make the
+dev domain work across the mesh:
+
+1. **Point the domain at this peer.** Read this machine's NetBird address with
+   `netbird status | grep 'NetBird IP'` and set it as `DEV_HOST_IP` in both
+   `.env` and `devdns/.env`, then `./dev restart devdns` — the Corefile is
+   templated at container start, so a restart is required.
+2. **Register CoreDNS in the NetBird dashboard** under **DNS → Nameservers**:
+   the peer's NetBird IP on `53/udp`, **no match domains — mark it primary /
+   "all domains"**, distributed to the groups that should resolve dev names.
+   Match domains on Linux need `systemd-resolved`, which is inactive here; the
+   primary form is safe because CoreDNS forwards everything outside
+   `dev.internal` upstream.
+3. **Install the root CA on each peer.** `./dev trust-ca --export-only` writes
+   `devdns/caddy/root.crt` for copying; DNS alone only gets them to Caddy.
+
+Verify from another peer with `netbird status -d | grep -i nameservers`
+(`1/1 Available`) and `dig penpot.dev.internal +short`.
+
+The full procedure, the primary-vs-match-domain rationale, the trade-off that
+comes with it, and troubleshooting are in [`devdns/README.md`](devdns/README.md).
+
 ### Caveat: Google and Apple OAuth
 
 Both require redirect URIs on a public, verifiable domain and will reject
