@@ -3,9 +3,13 @@
 */.env
 *.local
 
+# Agent credentials kept apart from the compose-level .env (hermes/agent.env)
+*/agent.env
+
 # Runtime state
 openviking/data/
 allr/data/
+hermes/data/
 devdns/caddy/root.crt
 
 # Editor / OS noise

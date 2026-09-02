@@ -1,0 +1,125 @@
+# Hermes — the upstream agent gateway + dashboard, fronted by the Caddy proxy
+# in devdns/. This is the same codebase allr/ builds, one rebrand upstream:
+# `mjx-hermes-agent` is where the latest upstream merges land, so this instance
+# exists to test them side by side with allr/ without either touching the
+# other's data directory.
+#
+# Adapted from mjx-hermes-agent's own docker-compose.yml with three deliberate
+# changes:
+#
+#   1. ONE container, not two. Upstream splits `gateway` and `dashboard` into
+#      separate containers and gets away with it only because both use
+#      `network_mode: host` — the dashboard's gateway-liveness probe needs a
+#      shared PID namespace. On a bridge network that split breaks, and worse,
+#      two containers bind-mounting one data dir is explicitly unsupported:
+#      cross-container sharing of a data volume corrupts session files and
+#      memory stores. So the gateway is the main process and the dashboard
+#      runs beside it as an s6-supervised service, enabled with
+#      HERMES_DASHBOARD=1 (see docker/s6-rc.d/dashboard/run in the source).
+#   2. network_mode: host -> devnet, so Caddy can reach it by container name.
+#   3. restart: "no" — upstream uses `unless-stopped`, which would bring Hermes
+#      back every time dockerd starts. See the root README.
+#
+# The dashboard's auth gate engages automatically on any non-loopback bind and
+# CANNOT be turned off: `--insecure` / HERMES_DASHBOARD_INSECURE are accepted
+# and ignored since the June 2026 hardening, and start_server refuses to bind
+# at all if no auth provider is registered. Binding 0.0.0.0 is required here
+# for Caddy to reach the container, so the bundled dashboard_auth/basic
+# provider supplies a username and password.
+
+name: hermes
+
+services:
+  hermes:
+    build:
+      context: ${HERMES_SOURCE_DIR:?set HERMES_SOURCE_DIR in hermes/.env}
+    image: hermes-agent
+    container_name: hermes
+    restart: "no"
+
+    # The gateway is the main process; the dashboard is supervised alongside it
+    # by s6. Do NOT set `entrypoint:` or docker's `--init` — the image's
+    # entrypoint-dispatch.sh must stay PID 1 so it can hand off to s6's /init,
+    # otherwise the supervision tree never starts and the dashboard silently
+    # never runs.
+    #
+    # Unlike allr/, this is upstream's bare ["gateway", "run"]. main-wrapper.sh
+    # treats a first argument that is not an executable on PATH as a subcommand
+    # and runs `hermes "$@"` — and here that binary genuinely exists, as the
+    # exec shim at /opt/hermes/bin/hermes. (The allr fork has to name its
+    # binary explicitly because its rebrand left no `hermes` on PATH.)
+    command: ["gateway", "run"]
+
+    # Loopback only — reachable from other peers as https://hermes.dev.internal
+    # through the Caddy proxy in devdns/. Port 9119 is already taken on the
+    # host by allr/, so this one binds 9120 and maps it to the container's 9119.
+    ports:
+      - "127.0.0.1:${HERMES_DASHBOARD_HOST_PORT:-9120}:9119"
+
+    volumes:
+      - ./data:/opt/data
+
+    # Provider API keys (OPENROUTER_API_KEY and friends) live here rather than
+    # in .env, so compose-level plumbing and agent credentials stay separate.
+    # Credential env vars are deliberately NOT scrubbed at startup — shell
+    # exports are a documented way to supply them (hermes_cli/env_loader.py) —
+    # so anything set here reaches the agent. A key written into
+    # data/.env by the dashboard takes precedence over the value here, which is
+    # what `get_env_value_prefer_dotenv` exists for.
+    env_file:
+      - agent.env
+
+    environment:
+      # s6's stage2 hook remaps the in-image `hermes` user to these, so files
+      # written into ./data stay owned by the host user. Never use docker's
+      # --user instead: docker/main-wrapper.sh hard-errors on an unknown UID.
+      HERMES_UID: ${HERMES_UID:-1000}
+      HERMES_GID: ${HERMES_GID:-1000}
+
+      # Start the supervised dashboard service beside the gateway.
+      HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_HOST: 0.0.0.0
+      HERMES_DASHBOARD_PORT: 9119
+
+      # Must include the scheme. A bare host here is silently discarded with a
+      # warning, and is documented upstream as the single most common cause of
+      # "I set HERMES_DASHBOARD_PUBLIC_URL but the OAuth callback is still http".
+      HERMES_DASHBOARD_PUBLIC_URL: ${HERMES_PUBLIC_URL:-https://hermes.dev.internal}
+
+      # Username/password gate — the bundled dashboard_auth/basic provider.
+      # Plaintext is fine here: it never leaves the gitignored hermes/.env, and
+      # the provider hashes it in memory at load. _SECRET is not optional in
+      # practice — without it the provider mints a random per-process HMAC key,
+      # so every restart silently invalidates the client's saved session.
+      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_BASIC_AUTH_USERNAME:?set HERMES_BASIC_AUTH_USERNAME in hermes/.env}
+      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_BASIC_AUTH_PASSWORD:?set HERMES_BASIC_AUTH_PASSWORD in hermes/.env}
+      HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${HERMES_BASIC_AUTH_SECRET:?set HERMES_BASIC_AUTH_SECRET in hermes/.env}
+
+      # start_server enables uvicorn's proxy_headers whenever the auth gate is
+      # on (web_server.py: proxy_headers=bool(app.state.auth_required)), but
+      # never sets forwarded_allow_ips, so uvicorn falls back to its own
+      # FORWARDED_ALLOW_IPS env var, defaulting to 127.0.0.1 only. Caddy
+      # reaches this container from another devnet IP, so without this its
+      # X-Forwarded-Proto: https is dropped, detect_https() returns False, and
+      # the session cookies lose their Secure flag and __Host- prefix —
+      # defeating the point of the repo's real-TLS setup. Scoping to * is safe:
+      # the port is loopback-bound, so only Caddy reaches it.
+      FORWARDED_ALLOW_IPS: ${HERMES_FORWARDED_ALLOW_IPS:-*}
+
+    healthcheck:
+      # /api/status is deliberately public (dashboard_auth/public_paths.py), so
+      # this probes liveness without needing credentials. Uses the image's own
+      # Python rather than curl, which is not guaranteed to be installed.
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9119/api/status',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+    networks:
+      - devnet
+
+networks:
+  devnet:
+    external: true
+    name: ${DEV_NETWORK:-devnet}

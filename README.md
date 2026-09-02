@@ -9,6 +9,7 @@ and never on boot**.
 | [`openviking/`](openviking/) | OpenViking context DB, Gemini embedding 2 + LiteLLM VLM | <https://openviking.dev.internal> |
 | [`penpot/`](penpot/) | Penpot design tool | <https://penpot.dev.internal> |
 | [`allr/`](allr/) | Allr agent gateway + dashboard | <https://allr.dev.internal> |
+| [`hermes/`](hermes/) | Hermes agent gateway + dashboard — the upstream of `allr/` | <https://hermes.dev.internal> |
 | [`devdns/`](devdns/) | CoreDNS for `*.dev.internal` + Caddy wildcard TLS | *(serves the rest)* |
 
 Two rules shape the whole repo:
@@ -55,6 +56,7 @@ to start an instance whose `.env` is missing and tells you what to copy.
 ./dev up penpot                   # brings up shared/, creates its DB, then starts
 ./dev up openviking
 ./dev up allr                     # first run builds the image — slow
+./dev up hermes                   # same, from the upstream source tree
 
 ./dev status
 ./dev logs penpot penpot-backend
@@ -113,6 +115,7 @@ from other peers.
 | OpenViking | `127.0.0.1:1933` |
 | Penpot | `127.0.0.1:9001` |
 | Allr dashboard | `127.0.0.1:9119` |
+| Hermes dashboard | `127.0.0.1:9120` |
 | Mailcatcher | `127.0.0.1:1080` |
 
 ## Verifying nothing starts on boot

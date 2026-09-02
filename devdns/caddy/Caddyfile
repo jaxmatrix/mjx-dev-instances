@@ -51,6 +51,15 @@
 		reverse_proxy allr:9119
 	}
 
+	@hermes host hermes.{$DEV_DOMAIN}
+	handle @hermes {
+		# Same reasoning as @allr above: the app owns its own auth gate, and the
+		# Universal client cannot answer an HTTP Basic challenge. This is the
+		# upstream build of the same agent, kept apart from allr so both can run
+		# at once against their own data directories.
+		reverse_proxy hermes:9119
+	}
+
 	# Any other *.dev.internal name resolves (the DNS wildcard answers) but has
 	# no service behind it. Say so explicitly rather than serving a confusing
 	# empty response.
