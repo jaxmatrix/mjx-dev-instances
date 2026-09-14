@@ -10,6 +10,7 @@ and never on boot**.
 | [`penpot/`](penpot/) | Penpot design tool | <https://penpot.dev.internal> |
 | [`allr/`](allr/) | Allr agent gateway + dashboard | <https://allr.dev.internal> |
 | [`hermes/`](hermes/) | Hermes agent gateway + dashboard — the upstream of `allr/` | <https://hermes.dev.internal> |
+| [`hermes-local/`](hermes-local/) | The same source tree installed on the host as the `hermes` command — no Docker | — |
 | [`devdns/`](devdns/) | CoreDNS for `*.dev.internal` + Caddy wildcard TLS | *(serves the rest)* |
 
 Two rules shape the whole repo:
@@ -57,6 +58,7 @@ to start an instance whose `.env` is missing and tells you what to copy.
 ./dev up openviking
 ./dev up allr                     # first run builds the image — slow
 ./dev up hermes                   # same, from the upstream source tree
+./dev up hermes-local             # install that tree as the host's `hermes` command
 
 ./dev status
 ./dev logs penpot penpot-backend

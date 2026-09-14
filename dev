@@ -169,15 +169,32 @@ provision_db() { # provision_db <instance>
 
 # ------------------------------------------------------------- commands -----
 
+# A KIND=host instance installs something onto this machine instead of running
+# containers: it has an install.sh and no docker-compose.yml, so `up` runs the
+# installer and every compose-only command skips it.
+is_host() { # is_host <instance>
+	[[ "$(meta "$1" KIND compose)" == "host" ]]
+}
+
 cmd_up() {
 	[[ $# -gt 0 ]] || die "usage: ./dev up <instance>...   (available: $(list_instances | tr '\n' ' '))"
-	require_docker
-	ensure_network
 
-	local inst
+	local inst docker_ready=0
 	for inst in "$@"; do
 		require_instance "$inst"
 		require_env_file "$inst"
+
+		if is_host "$inst"; then
+			info "installing ${B}${inst}${N} on the host"
+			"./$inst/install.sh"
+			continue
+		fi
+
+		if [[ $docker_ready -eq 0 ]]; then
+			require_docker
+			ensure_network
+			docker_ready=1
+		fi
 
 		if [[ "$(meta "$inst" NEEDS_SHARED false)" == "true" ]]; then
 			ensure_shared
@@ -200,6 +217,7 @@ cmd_down() {
 		local inst
 		for inst in $(list_instances); do
 			[[ "$inst" == "shared" ]] && continue
+			is_host "$inst" && continue
 			docker compose -f "$inst/docker-compose.yml" ps -q 2>/dev/null | grep -q . \
 				&& { info "stopping ${B}${inst}${N}"; dc "$inst" down; }
 		done
@@ -211,6 +229,10 @@ cmd_down() {
 	local inst
 	for inst in "$@"; do
 		require_instance "$inst"
+		if is_host "$inst"; then
+			warn "${inst} is a host install with nothing to stop — see ${inst}/README.md to uninstall"
+			continue
+		fi
 		info "stopping ${B}${inst}${N}"
 		dc "$inst" down
 	done
@@ -239,11 +261,15 @@ cmd_status() {
 
 	local inst n state
 	for inst in $(list_instances); do
-		n="$( (cd "$inst" && docker compose ps -q 2>/dev/null) | grep -c . || true)"
-		if [[ "$n" -gt 0 ]]; then
-			state="${GRN}up (${n})${N}"
+		if is_host "$inst"; then
+			state="${DIM}host${N}"
 		else
-			state="${DIM}down${N}"
+			n="$( (cd "$inst" && docker compose ps -q 2>/dev/null) | grep -c . || true)"
+			if [[ "$n" -gt 0 ]]; then
+				state="${GRN}up (${n})${N}"
+			else
+				state="${DIM}down${N}"
+			fi
 		fi
 		printf '%-12s %-21b %s\n' "$inst" "$state" "$(meta "$inst" URL)"
 	done
@@ -252,10 +278,17 @@ cmd_status() {
 		"$B" "$N" "$DEV_NETWORK" "$B" "$N" "$DEV_DOMAIN" "${DEV_HOST_IP:-unset}"
 }
 
+require_compose_instance() { # require_compose_instance <instance> <command>
+	require_instance "$1"
+	if is_host "$1"; then
+		die "$1 is a host install with no containers, so '$2' does not apply. Reinstall with: ./dev up $1"
+	fi
+}
+
 cmd_logs() {
 	[[ $# -gt 0 ]] || die "usage: ./dev logs <instance> [service]"
 	require_docker
-	require_instance "$1"
+	require_compose_instance "$1" logs
 	local inst="$1"; shift
 	dc "$inst" logs -f --tail 200 "$@"
 }
@@ -265,7 +298,7 @@ cmd_restart() {
 	require_docker
 	local inst
 	for inst in "$@"; do
-		require_instance "$inst"
+		require_compose_instance "$inst" restart
 		info "restarting ${B}${inst}${N}"
 		dc "$inst" restart
 	done
@@ -273,11 +306,15 @@ cmd_restart() {
 
 cmd_pull() {
 	require_docker
-	local targets=("$@")
-	[[ ${#targets[@]} -eq 0 ]] && mapfile -t targets < <(list_instances)
-	local inst
+	local targets=("$@") inst
+	if [[ ${#targets[@]} -eq 0 ]]; then
+		targets=()
+		for inst in $(list_instances); do
+			is_host "$inst" || targets+=("$inst")
+		done
+	fi
 	for inst in "${targets[@]}"; do
-		require_instance "$inst"
+		require_compose_instance "$inst" pull
 		info "pulling images for ${B}${inst}${N}"
 		dc "$inst" pull
 	done
@@ -325,7 +362,8 @@ usage() {
 	cat <<-USAGE
 	${B}dev${N} — start and stop the dev instances in this repo
 
-	  ./dev up <instance>...        start (brings up shared datastores first if needed)
+	  ./dev up <instance>...        start (brings up shared datastores first if needed);
+	                                for a host instance (hermes-local), (re)install it
 	  ./dev down <instance>...      stop; also stops shared once nothing needs it
 	  ./dev down --all              stop everything
 	  ./dev status                  what is running, and where to reach it

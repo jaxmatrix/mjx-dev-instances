@@ -11,6 +11,7 @@ openviking/data/
 allr/data/
 allr/dex/data/
 hermes/data/
+hermes-local/replaced-bin/
 devdns/caddy/root.crt
 
 # Editor / OS noise
