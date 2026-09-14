@@ -31,6 +31,17 @@ services:
   allr:
     build:
       context: ${ALLR_SOURCE_DIR:?set ALLR_SOURCE_DIR in allr/.env}
+
+      # Build with the host's network namespace. This host's only nameserver
+      # is a NetBird overlay address (see /etc/resolv.conf), which a build
+      # container on the default bridge cannot route to — every apt-get and
+      # curl in the Dockerfile dies with "Temporary failure resolving
+      # deb.debian.org" and the build fails at exit 100. The host namespace
+      # gives the build the same routing the host has.
+      #
+      # Only affects image building, not the running container, which stays on
+      # devnet below.
+      network: host
     image: allr-agent
     container_name: allr
     restart: "no"
@@ -58,6 +69,22 @@ services:
     volumes:
       - ./data:/opt/data
 
+      # No-rebuild edit loop for the auth code. The package is installed
+      # editable at /opt/hermes (Dockerfile: `uv pip install -e .`), so the
+      # .py files under it are what actually executes — and everything the
+      # login gate touches is pure Python: the login page is server-rendered,
+      # not part of the SPA bundle.
+      #
+      # Scoped to this ONE subpackage on purpose. Mounting hermes_cli/ or the
+      # repo root over /opt/hermes would shadow hermes_cli/web_dist, which is
+      # generated inside the image by `npm run build` and does not exist on
+      # the host — the dashboard would serve a blank page. Read-only to match
+      # the image, which seals /opt/hermes root-owned.
+      #
+      # Restart the container to pick up an edit. Comment this out to test
+      # exactly what the image was built with.
+      - ${ALLR_SOURCE_DIR}/hermes_cli/dashboard_auth:/opt/hermes/hermes_cli/dashboard_auth:ro
+
     environment:
       # s6's stage2 hook remaps the in-image `hermes` user to these, so files
       # written into ./data stay owned by the host user. Never use docker's
@@ -80,9 +107,32 @@ services:
       # the provider hashes it in memory at load. _SECRET is not optional in
       # practice — without it the provider mints a random per-process HMAC key,
       # so every restart silently invalidates the client's saved session.
-      ALLR_DASHBOARD_BASIC_AUTH_USERNAME: ${ALLR_BASIC_AUTH_USERNAME:?set ALLR_BASIC_AUTH_USERNAME in allr/.env}
-      ALLR_DASHBOARD_BASIC_AUTH_PASSWORD: ${ALLR_BASIC_AUTH_PASSWORD:?set ALLR_BASIC_AUTH_PASSWORD in allr/.env}
-      ALLR_DASHBOARD_BASIC_AUTH_SECRET: ${ALLR_BASIC_AUTH_SECRET:?set ALLR_BASIC_AUTH_SECRET in allr/.env}
+      #
+      # These were `:?` (hard-fail when unset). They are `:-` now because
+      # emptying them is a supported TEST STATE, not a misconfiguration: the
+      # dashboard only hands login off to the IdP when the OIDC provider is
+      # the ONLY one registered, and the basic provider no-ops on a blank
+      # username. Clear ALLR_BASIC_AUTH_USERNAME in .env to reach that state.
+      #
+      # The gate still fails closed — with basic auth blank AND no OIDC
+      # issuer, no provider registers and start_server refuses to bind.
+      ALLR_DASHBOARD_BASIC_AUTH_USERNAME: ${ALLR_BASIC_AUTH_USERNAME:-}
+      ALLR_DASHBOARD_BASIC_AUTH_PASSWORD: ${ALLR_BASIC_AUTH_PASSWORD:-}
+      ALLR_DASHBOARD_BASIC_AUTH_SECRET: ${ALLR_BASIC_AUTH_SECRET:-}
+
+      # Where the login page comes from: "internal" renders Allr's own page,
+      # "external" hands sign-in to the IdP below. Empty means "unset" — a
+      # blank value cannot shadow dashboard.login in data/config.yaml, which
+      # is what makes the env-beats-config precedence testable.
+      ALLR_DASHBOARD_LOGIN: ${ALLR_LOGIN_MODE:-}
+
+      # Self-hosted OIDC provider -> the dex service below. This is the
+      # non-password provider that makes `external` observable; with only the
+      # basic provider registered the page renders in both modes.
+      # Mirrors how Allr.OS wires each agent to its Dex.
+      ALLR_DASHBOARD_OIDC_ISSUER: ${ALLR_OIDC_ISSUER:-http://auth.localhost:5556}
+      ALLR_DASHBOARD_OIDC_CLIENT_ID: ${ALLR_OIDC_CLIENT_ID:-allr-dashboard}
+      ALLR_DASHBOARD_OIDC_SCOPES: "openid profile email"
 
       # start_server enables uvicorn's proxy_headers whenever the auth gate is
       # on, but never sets forwarded_allow_ips, so uvicorn defaults to trusting
@@ -105,6 +155,50 @@ services:
 
     networks:
       - devnet
+
+    # Dex only has to be reachable by the time a login is attempted, not at
+    # boot: the OIDC provider registers from env vars and discovery is lazy.
+    # Ordering it first still avoids a confusing first-request failure.
+    depends_on:
+      - dex
+
+  # ---------------------------------------------------------------------------
+  # Dex — the OIDC identity provider. Config and the reasoning behind the
+  # issuer URL live in ./dex/dex.yaml.
+  # ---------------------------------------------------------------------------
+  dex:
+    image: ghcr.io/dexidp/dex:${DEX_VERSION:-v2.45.1}
+    container_name: allr-dex
+    restart: "no"
+
+    command: ["dex", "serve", "/etc/dex/dex.yaml"]
+
+    # Run as the host user that owns ./dex/data. The image's own `dex` user has
+    # a different uid, so it cannot create dex.db in a bind-mounted directory —
+    # Dex exits 2 with "unable to open database file". Same reasoning as
+    # ALLR_UID/ALLR_GID on the allr service above, applied the other way round.
+    user: "${ALLR_UID:-1000}:${ALLR_GID:-1000}"
+
+    # The BROWSER's way in. *.localhost is loopback by RFC 6761, so
+    # http://auth.localhost:5556 in the address bar lands here.
+    ports:
+      - "127.0.0.1:${DEX_PORT:-5556}:5556"
+
+    volumes:
+      - ./dex/dex.yaml:/etc/dex/dex.yaml:ro
+      # sqlite storage: the signing keys live here, so dropping it invalidates
+      # every issued token. Gitignored alongside ./data.
+      - ./dex/data:/var/dex
+
+    networks:
+      devnet:
+        # The AGENT's way in, and the reason this works at all. The agent must
+        # reach the issuer at the same URL the browser uses, or OIDC discovery
+        # rejects the mismatch. This alias makes Docker's embedded DNS answer
+        # `auth.localhost` with this container's address, so both sides agree
+        # on http://auth.localhost:5556 while resolving it differently.
+        aliases:
+          - auth.localhost
 
 networks:
   devnet:

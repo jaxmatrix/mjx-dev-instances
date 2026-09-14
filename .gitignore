@@ -9,6 +9,7 @@
 # Runtime state
 openviking/data/
 allr/data/
+allr/dex/data/
 hermes/data/
 devdns/caddy/root.crt
 

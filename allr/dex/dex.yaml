@@ -1,0 +1,77 @@
+# Dex — an OIDC identity provider for this instance, so the dashboard's
+# `external` login mode can actually be exercised.
+#
+# Why this exists at all: allr-agent only hands login off to an IdP when
+# exactly ONE provider is registered and that provider does not take a
+# password. The bundled dashboard_auth/basic provider does take a password, so
+# with basic auth alone `dashboard.login: external` is indistinguishable from
+# `internal` — the page renders either way. Dex supplies the non-password
+# provider that makes the difference visible.
+#
+# ---------------------------------------------------------------------------
+# The issuer, and why it is `auth.localhost` rather than `auth.dev.internal`
+# ---------------------------------------------------------------------------
+#
+# The issuer string has to be byte-identical for the browser and for the agent
+# container — OIDC discovery pins it — and both have to be able to reach it.
+#
+#   browser (host)     *.localhost is loopback by RFC 6761, so this resolves to
+#                      127.0.0.1, where the port below is published
+#   agent (container)  the `auth.localhost` network alias on this service in
+#                      docker-compose.yml; Docker's embedded DNS answers it
+#                      with this container's devnet address
+#
+# Plain HTTP is deliberate and is only legal because of the hostname:
+# `_require_https_or_loopback` in plugins/dashboard_auth/self_hosted/__init__.py
+# rejects http:// for every host except localhost, 127.0.0.1, ::1 and *.localhost.
+#
+# The obvious-looking alternative, https://auth.dev.internal through the Caddy
+# proxy, fails twice over. The agent would have to trust Caddy's internal CA
+# (which is why Allr.OS bakes it into a derived image), and CoreDNS answers
+# every *.dev.internal name with DEV_HOST_IP — which is 127.0.0.1, i.e. the
+# agent container itself, not Caddy.
+issuer: http://auth.localhost:5556
+
+storage:
+  type: sqlite3
+  config:
+    file: /var/dex/dex.db
+
+web:
+  # Bind all interfaces inside the container: reached on the published
+  # loopback port by the browser, and by container IP from the agent.
+  http: 0.0.0.0:5556
+
+# No `frontend.dir` — Dex's stock templates are fine here. Allr.OS mounts a
+# branded theme; this instance is for testing the redirect, not the design.
+
+oauth2:
+  # Show the password form straight away instead of a connector chooser: there
+  # is only one connector, so the extra click proves nothing.
+  passwordConnector: local
+  # Skip the "Grant access?" screen. This is a single-tenant dev IdP and the
+  # consent step only lengthens the round trip under test.
+  skipApprovalScreen: true
+
+enablePasswordDB: true
+
+staticPasswords:
+  # Dev account. The hash is bcrypt; regenerate with:
+  #   htpasswd -bnBC 10 "" '<password>' | cut -d: -f2
+  - email: "dev@allr.test"
+    hash: "$2y$10$pEpB.uFHgzB.tXlcwpKyTOY8/VOsuQ7ZKPCCtPoIbwEJ.InXBRK.W"
+    username: "dev"
+    userID: "00000000-0000-0000-0000-000000000001"
+
+staticClients:
+  # The dashboard, registered as a PUBLIC client: PKCE, no client secret. That
+  # matches how Allr.OS registers each agent (`dash-<user>`) and means no
+  # credential has to live in this file or in the container.
+  - id: allr-dashboard
+    name: "Allr Dashboard"
+    public: true
+    redirectURIs:
+      # Stays on Caddy/HTTPS — only Dex moved to plain HTTP. This must match
+      # ALLR_DASHBOARD_PUBLIC_URL in the instance .env exactly, or Dex rejects
+      # the callback with `redirect_uri did not match`.
+      - https://allr.dev.internal/auth/callback

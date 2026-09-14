@@ -24,6 +24,28 @@ the terminal UI. Later starts reuse the image.
 - Dashboard: <https://allr.dev.internal> (or `http://127.0.0.1:9119`)
 - Login: the `ALLR_BASIC_AUTH_USERNAME` / `ALLR_BASIC_AUTH_PASSWORD` from `.env`
   (`admin` / `allrdev` by default — deliberately simple, for testing)
+- Dex (OIDC): <http://auth.localhost:5556>, dev account `dev@allr.test` /
+  `allrdev`. See [Login modes](#login-modes) for what it is for.
+
+> **Rebuilding after a source change.** `../dev up allr` runs a plain
+> `docker compose up -d`, which builds only when the image tag is *missing*.
+> After the first build it will happily start a stale image and your change
+> will look like it did nothing. Build explicitly:
+>
+> ```bash
+> docker compose build allr && ../dev up allr
+> ```
+>
+> Python under `hermes_cli/dashboard_auth/` is bind-mounted from the source
+> tree, so edits there need only a restart — see the mount comment in
+> `docker-compose.yml`.
+
+> **If the build dies at `apt-get` with exit 100** — "Temporary failure
+> resolving deb.debian.org" — that is DNS, not the Dockerfile. This host's
+> only nameserver is a NetBird overlay address, which a build container on the
+> default bridge cannot route to. The `build.network: host` line in
+> `docker-compose.yml` is the fix; drop it if you ever move to a host with an
+> ordinary resolver.
 
 ## Connecting Allr Universal
 
@@ -40,6 +62,49 @@ Universal probes `/api/status`, discovers that the backend is gated and offers a
 password provider, POSTs the credentials to `/auth/login`, stores the session
 cookie, then mints a single-use ticket and opens `wss://allr.dev.internal/api/ws`.
 
+## Login modes
+
+`dashboard.login` decides whether Allr renders its own sign-in page or hands
+sign-in to an identity provider. Set it with `ALLR_LOGIN_MODE` in `.env`
+(or `dashboard.login` in `data/config.yaml`; the env var wins when non-empty).
+
+`external` only changes anything when the OIDC provider is the **only** one
+registered. It deliberately still renders the page when a password provider is
+present — that is the way back into a deployment whose IdP is down — so the
+two knobs interact:
+
+| `ALLR_LOGIN_MODE` | `ALLR_BASIC_AUTH_USERNAME` | `/login` does |
+|---|---|---|
+| `internal` | set | renders: password form + a Dex button |
+| `internal` | *empty* | renders: a chooser with one Dex button |
+| `external` | *empty* | **302 straight to Dex** |
+| `external` | set | renders anyway — the break-glass guard |
+
+Switching costs a container recreate, not a rebuild:
+
+```bash
+$EDITOR .env          # ALLR_LOGIN_MODE / ALLR_BASIC_AUTH_USERNAME
+docker compose up -d  # recreates with the new env
+```
+
+Flipping `dashboard.login` in `data/config.yaml` is faster still — `load_config()`
+caches on the file's mtime and size, so it takes effect on the next request with
+no restart at all. Leave `ALLR_LOGIN_MODE` blank for that to be what decides.
+
+### Why Dex is at `auth.localhost`, not `auth.dev.internal`
+
+The issuer string has to be byte-identical for the browser and for the agent
+container — OIDC discovery pins it — and both have to reach it. `*.localhost`
+is loopback by RFC 6761, so the browser gets there via the published port,
+while a `auth.localhost` network alias on the Dex service points the agent at
+the same name over `devnet`.
+
+Routing Dex through Caddy instead fails twice: the agent would have to trust
+Caddy's internal CA, and CoreDNS answers every `*.dev.internal` name with
+`DEV_HOST_IP` — `127.0.0.1`, which inside the agent container is the agent
+itself. Plain HTTP is legal here only because of the hostname; allr-agent
+rejects an `http://` issuer on anything but localhost.
+
 ## Authentication, and why it is not in Caddy
 
 Allr's dashboard auth gate engages automatically on **any** non-loopback bind,
@@ -49,9 +114,15 @@ to bind at all when no auth provider is registered. Because Caddy has to reach
 this container over `devnet`, the dashboard binds `0.0.0.0`, so an auth provider
 is mandatory.
 
-This instance uses the bundled `dashboard_auth/basic` provider: a username and
-password, stateless HMAC-signed sessions, no OAuth IDP and no database. It is
-configured purely through environment variables, so no secret is ever committed.
+This instance registers two providers, both purely from environment variables,
+so no secret is ever committed:
+
+- `dashboard_auth/basic` — a username and password, stateless HMAC-signed
+  sessions, no IDP and no database. This is what the Universal client logs in
+  against, so it is a feature here rather than an obstacle.
+- `dashboard_auth/self_hosted` — generic OIDC, pointed at the Dex container.
+  Present so [`dashboard.login: external`](#login-modes) has a non-password
+  provider to hand off to; blank the basic-auth vars to leave it alone.
 
 A Caddy `basic_auth` block would be the wrong layer. Universal authenticates
 with a session cookie plus a minted WebSocket ticket, not an `Authorization:
@@ -67,6 +138,7 @@ duplicating a gate the application already enforces.
 | `network_mode: host` | `devnet` bridge | Caddy routes to it by container name |
 | dashboard on `127.0.0.1` | `0.0.0.0`, gated | reachable as `allr.dev.internal` |
 | no auth configured | `dashboard_auth/basic` | a non-loopback bind fails closed without a provider |
+| — | `dashboard_auth/self_hosted` + a Dex container | a non-password provider is the only way `dashboard.login: external` is observable |
 | `restart: unless-stopped` | `restart: "no"` | nothing may come back when dockerd starts |
 | `~/.allr` volume | `./data` | isolated from the real host profile |
 | — | `FORWARDED_ALLOW_IPS` | uvicorn otherwise trusts only `127.0.0.1` and drops Caddy's `X-Forwarded-Proto`, stripping `Secure` from session cookies |
@@ -88,6 +160,7 @@ Teardown:
 ```bash
 ../dev down allr
 rm -rf data/            # destroys sessions, memories and state.db
+rm -rf dex/data/        # Dex's sqlite: signing keys, so this invalidates tokens
 docker image rm allr-agent
 ```
 
