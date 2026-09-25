@@ -56,11 +56,14 @@ services:
     # binary explicitly because its rebrand left no `hermes` on PATH.)
     command: ["gateway", "run"]
 
-    # Loopback only — reachable from other peers as https://hermes.dev.internal
-    # through the Caddy proxy in devdns/. Port 9119 is already taken on the
-    # host by allr/, so this one binds 9120 and maps it to the container's 9119.
+    # Published on HERMES_DASHBOARD_BIND_IP (default 0.0.0.0) so LAN clients —
+    # notably the Hermes Universal Android build — can hit the dashboard as
+    # http://192.168.1.10:9120 (or .9) without going through Caddy. Port 9119
+    # is already taken on the host by allr/, so this one maps 9120 → 9119.
+    # https://hermes.dev.internal still works through Caddy on 443 for peers
+    # that resolve *.dev.internal.
     ports:
-      - "127.0.0.1:${HERMES_DASHBOARD_HOST_PORT:-9120}:9119"
+      - "${HERMES_DASHBOARD_BIND_IP:-0.0.0.0}:${HERMES_DASHBOARD_HOST_PORT:-9120}:9119"
 
     volumes:
       - ./data:/opt/data
@@ -111,8 +114,11 @@ services:
       # reaches this container from another devnet IP, so without this its
       # X-Forwarded-Proto: https is dropped, detect_https() returns False, and
       # the session cookies lose their Secure flag and __Host- prefix —
-      # defeating the point of the repo's real-TLS setup. Scoping to * is safe:
-      # the port is loopback-bound, so only Caddy reaches it.
+      # defeating the point of the repo's real-TLS setup. * is intentional:
+      # Caddy reaches this container from a shifting devnet address, and LAN
+      # clients talk to the published port directly (no X-Forwarded-* to forge
+      # unless they are already on the LAN). Narrow this if you ever put the
+      # published port on an untrusted network.
       FORWARDED_ALLOW_IPS: ${HERMES_FORWARDED_ALLOW_IPS:-*}
 
     healthcheck:

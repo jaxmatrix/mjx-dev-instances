@@ -29,6 +29,9 @@ build that compiles SQLite, installs Python via `uv` with most extras, runs
 terminal UI. Later starts reuse the image.
 
 - Dashboard: <https://hermes.dev.internal> (or `http://127.0.0.1:9120`)
+- LAN / Android Universal: `http://192.168.1.10:9120` or `http://192.168.1.9:9120`
+  (whichever address the phone shares with this machine). In the app: Remote
+  URL → that address → Sign in with the same basic-auth credentials.
 - Login: the `HERMES_BASIC_AUTH_USERNAME` / `HERMES_BASIC_AUTH_PASSWORD` from
   `.env` (`admin` / `hermesdev` by default — deliberately simple, for testing).
   That is the bundled **simple auth** provider; see
@@ -36,6 +39,8 @@ terminal UI. Later starts reuse the image.
 
 Port 9120, not 9119: `allr/` already binds 9119 on the host. Inside the
 container the dashboard still listens on 9119, which is what Caddy proxies to.
+The host publish defaults to `0.0.0.0` (`HERMES_DASHBOARD_BIND_IP`) so phones
+on the LAN can reach it; set that to `127.0.0.1` to lock it local-only again.
 
 ## Testing an upstream merge
 
@@ -108,8 +113,9 @@ Compose maps those onto `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` / `_PASSWORD` /
 `_SECRET`. The secret is the token-signing key: without it the provider mints a
 random one per process, so every restart silently invalidates saved sessions.
 
-The same username and password are what a remote client (Universal, or a
-browser) types at `https://hermes.dev.internal`.
+The same username and password are what a remote client (Universal desktop /
+Android, or a browser) types at `https://hermes.dev.internal` or at the LAN
+URL `http://<this-machine>:9120`.
 
 ### No plaintext at rest
 
@@ -162,7 +168,7 @@ gate the application already enforces.
 | no auth configured | the simple `plugins/dashboard_auth/basic` provider | a non-loopback bind fails closed without a provider, and this is the only bundled one needing no external IDP |
 | `restart: unless-stopped` | `restart: "no"` | nothing may come back when dockerd starts |
 | `~/.hermes` volume | `./data` | isolated from the real host profile, and from `allr/data` |
-| host port 9119 | host port 9120 | `allr/` already has 9119 |
+| host port 9119, loopback | host port 9120 on `0.0.0.0` | `allr/` already has 9119; LAN bind lets Universal Android hit `http://192.168.1.10:9120` |
 | — | `env_file: agent.env` | provider keys without hand-seeding `data/.env` first |
 | — | `FORWARDED_ALLOW_IPS` | uvicorn otherwise trusts only `127.0.0.1` and drops Caddy's `X-Forwarded-Proto`, stripping `Secure` from session cookies |
 
