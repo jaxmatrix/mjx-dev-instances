@@ -1,0 +1,28 @@
+# Jaeger v2 all-in-one — OTLP collector + query UI for local tracing.
+# https://www.jaegertracing.io/docs/latest/getting-started/
+#
+# Default in-memory storage: spans live for the life of the container.
+# Reachable from other peers as https://jaeger.dev.internal (UI) and
+# https://otel.dev.internal (OTLP HTTP) through the Caddy proxy in devdns/.
+
+name: jaeger
+
+services:
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:${JAEGER_VERSION:-2.20.0}
+    container_name: jaeger
+    restart: "no"
+
+    # Loopback only — peers use the Caddy routes, not these binds.
+    ports:
+      - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686"
+      - "127.0.0.1:${JAEGER_OTLP_GRPC_PORT:-4317}:4317"
+      - "127.0.0.1:${JAEGER_OTLP_HTTP_PORT:-4318}:4318"
+
+    networks:
+      - devnet
+
+networks:
+  devnet:
+    external: true
+    name: ${DEV_NETWORK:-devnet}
