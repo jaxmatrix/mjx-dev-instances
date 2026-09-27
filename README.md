@@ -11,6 +11,7 @@ and never on boot**.
 | [`allr/`](allr/) | Allr agent gateway + dashboard | <https://allr.dev.internal> |
 | [`hermes/`](hermes/) | Hermes agent gateway + dashboard — the upstream of `allr/` | <https://hermes.dev.internal> |
 | [`hermes-local/`](hermes-local/) | The same source tree installed on the host as the `hermes` command — no Docker | — |
+| [`jaeger/`](jaeger/) | Jaeger UI + OTLP collector for mobile/app traces | <https://jaeger.dev.internal> |
 | [`devdns/`](devdns/) | CoreDNS for `*.dev.internal` + Caddy wildcard TLS | *(serves the rest)* |
 
 Two rules shape the whole repo:
@@ -144,6 +145,9 @@ from other peers.
 | Allr dashboard | `127.0.0.1:9119` |
 | Hermes dashboard | `127.0.0.1:9120` |
 | Mailcatcher | `127.0.0.1:1080` |
+| Jaeger UI | `127.0.0.1:16686` |
+| Jaeger OTLP gRPC | `127.0.0.1:4317` |
+| Jaeger OTLP HTTP | `127.0.0.1:4318` |
 
 ## Verifying nothing starts on boot
 

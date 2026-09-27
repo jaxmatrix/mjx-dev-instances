@@ -60,6 +60,17 @@
 		reverse_proxy hermes:9119
 	}
 
+	@jaeger host jaeger.{$DEV_DOMAIN}
+	handle @jaeger {
+		reverse_proxy jaeger:16686
+	}
+
+	@otel host otel.{$DEV_DOMAIN}
+	handle @otel {
+		# OTLP HTTP (POST /v1/traces) for mobile and other OpenTelemetry SDKs.
+		reverse_proxy jaeger:4318
+	}
+
 	# Any other *.dev.internal name resolves (the DNS wildcard answers) but has
 	# no service behind it. Say so explicitly rather than serving a confusing
 	# empty response.
