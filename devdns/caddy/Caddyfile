@@ -67,7 +67,20 @@
 
 	@otel host otel.{$DEV_DOMAIN}
 	handle @otel {
-		# OTLP HTTP (POST /v1/traces) for mobile and other OpenTelemetry SDKs.
+		# OTLP HTTP for OpenTelemetry SDKs. Handle OPTIONS here so browser
+		# preflights succeed even if the upstream is slow; do not also set
+		# ACAO on the reverse_proxy path — Jaeger already emits CORS on
+		# POST, and duplicate ACAO headers fail some browsers.
+		@otlpOptions {
+			method OPTIONS
+		}
+		handle @otlpOptions {
+			header Access-Control-Allow-Origin *
+			header Access-Control-Allow-Methods "POST, OPTIONS"
+			header Access-Control-Allow-Headers *
+			header Access-Control-Max-Age "7200"
+			respond 204
+		}
 		reverse_proxy jaeger:4318
 	}
 

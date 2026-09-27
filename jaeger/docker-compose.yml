@@ -4,6 +4,9 @@
 # Default in-memory storage: spans live for the life of the container.
 # Reachable from other peers as https://jaeger.dev.internal (UI) and
 # https://otel.dev.internal (OTLP HTTP) through the Caddy proxy in devdns/.
+#
+# config.yaml enables OTLP HTTP CORS (allowed_origins: ["*"]) so browser
+# exporters can preflight against the loopback OTLP port.
 
 name: jaeger
 
@@ -12,6 +15,14 @@ services:
     image: cr.jaegertracing.io/jaegertracing/jaeger:${JAEGER_VERSION:-2.20.0}
     container_name: jaeger
     restart: "no"
+    command: ["--config", "/etc/jaeger/config.yaml"]
+
+    # 0.0.0.0 so Caddy on devnet can reach OTLP/UI; host binds stay loopback.
+    environment:
+      JAEGER_LISTEN_HOST: "0.0.0.0"
+
+    volumes:
+      - ./config.yaml:/etc/jaeger/config.yaml:ro
 
     # Loopback only — peers use the Caddy routes, not these binds.
     ports:

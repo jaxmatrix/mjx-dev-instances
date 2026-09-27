@@ -8,6 +8,11 @@ Storage is the default **in-memory** backend: spans survive only for the life of
 the container. That matches how this repo runs services (started by hand, never
 on boot).
 
+[`config.yaml`](config.yaml) is the Jaeger v2 all-in-one config with
+`otlp.protocols.http.cors.allowed_origins: ["*"]` so browser exporters can
+preflight against the loopback OTLP port. Caddy mirrors the same CORS headers
+on `otel.dev.internal` for mesh/HTTPS clients.
+
 ## Setup
 
 ```bash
@@ -50,13 +55,42 @@ Skip HTTPS and talk to the loopback publish:
 
 ## Smoke test
 
+CORS preflight (loopback — Jaeger config):
+
+```bash
+curl -si -X OPTIONS http://127.0.0.1:4318/v1/traces \
+  -H 'Origin: http://localhost:3000' \
+  -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: content-type'
+# expect: 204 + Access-Control-Allow-Origin: *
+```
+
+CORS preflight (mesh — Caddy):
+
+```bash
+curl -si -X OPTIONS https://otel.dev.internal/v1/traces \
+  -H 'Origin: https://hermes.dev.internal' \
+  -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: content-type'
+# expect: 204 + Access-Control-Allow-Origin: *
+```
+
+Empty export:
+
 ```bash
 curl -sS -X POST http://127.0.0.1:4318/v1/traces \
   -H 'Content-Type: application/json' \
   -d '{"resourceSpans":[]}'
 ```
 
-Then open the UI and search for recent traces from your instrumented app.
+From the instrumented app console, force a flush before digging into
+Workspace lazy-load issues:
+
+```js
+await __hermesTrace.flush()
+```
+
+Then open the UI and search for recent traces.
 
 ## Notes
 
